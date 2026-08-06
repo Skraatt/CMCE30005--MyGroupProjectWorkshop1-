@@ -47,3 +47,22 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Large data files
+*.csv
+*.xlsx
+*.csv.gz
+
+# R outputs
+*.RData
+*.rds
+.Rhistory
+.Rapp.history
+
+# Compiled reports (keep .Rmd source, not rendered HTML if it's auto-generated)
+# Uncomment the line below only if you want to exclude HTML outputs:
+# *.html
+
+# OS files
+.DS_Store
+Thumbs.db
