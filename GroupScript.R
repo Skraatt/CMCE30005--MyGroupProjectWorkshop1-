@@ -479,4 +479,1038 @@ log_step("Calendar occupancy (90d) — median: ",
 L <- merge(L, cal, by.x = "id", by.y = "listing_id", all.x = TRUE)
 log_step("Merged calendar features. Unmatched listings: ",
          sum(is.na(L$occupancy_cal_90)))
+
+# Reload calendar temporarily for validation
+C <- fread(
+  file.path(RAW, "calendar_airbnb.csv"),
+  showProgress = FALSE
+)
+
+C[, date := as.Date(date)]
+
+cal_check <- C[
+  date >= SNAPSHOT_DATE &
+    date < SNAPSHOT_DATE + 90,
+  .(
+    cal_days_90 = .N,
+    cal_unavailable_90 =
+      sum(available == "f", na.rm = TRUE)
+  ),
+  by = listing_id
+]
+
+cal_check[, occupancy_cal_90_check :=
+            cal_unavailable_90 / cal_days_90]
 rm(C); invisible(gc())
+
+
+##  DESCRIPTIVE / MORE EXPLORATORY ANALYSIS
+
+
+library(data.table)
+library(ggplot2)
+library(scales)
+library(gt)
+
+# For nicer labels on scatterplot:
+# install.packages("ggrepel")   # run once if needed
+
+# Evidence of recent listing activity
+L[, active_90 := !is.na(days_since_last_review) &
+    days_since_last_review <= 90]
+
+# Price sample
+L_price <- L[!is.na(price_wins)]
+
+# Consistent visual colours
+COL_BLUE   <- "#0C6DCD"
+COL_ORANGE <- "#F59E0B"
+COL_SLATE  <- "#64748B"
+COL_LIGHT  <- "#EAF2FB"
+COL_TEXT   <- "#344054"
+
+# Consistent graph style
+theme_rq1 <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 15,
+      colour = "#101828"
+    ),
+    plot.subtitle = element_text(
+      size = 10.5,
+      colour = "#667085"
+    ),
+    plot.caption = element_text(
+      size = 8.5,
+      colour = "#667085",
+      hjust = 0
+    ),
+    axis.title = element_text(
+      face = "bold",
+      colour = COL_TEXT
+    ),
+    axis.text = element_text(
+      colour = COL_TEXT
+    ),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    legend.position = "bottom",
+    plot.margin = margin(10, 18, 10, 10)
+  )
+
+stat_row <- function(label, x) {
+  
+  data.table(
+    Variable = label,
+    N = sum(!is.na(x)),
+    Missing = mean(is.na(x)),
+    Mean = mean(x, na.rm = TRUE),
+    SD = sd(x, na.rm = TRUE),
+    Median = median(x, na.rm = TRUE),
+    IQR = IQR(x, na.rm = TRUE)
+  )
+}
+
+
+summary_stats <- rbindlist(list(
+  
+  stat_row(
+    "Nightly price (AUD)",
+    L$price_wins
+  ),
+  
+  stat_row(
+    "Reviews in last 12 months",
+    L$review_velocity
+  ),
+  
+  stat_row(
+    "Bedrooms",
+    L$bedrooms_clean
+  ),
+  
+  stat_row(
+    "Guest capacity",
+    L$accommodates
+  ),
+  
+  stat_row(
+    "Amenity count",
+    L$amenity_count
+  ),
+  
+  stat_row(
+    "Distance to CBD (km)",
+    L$dist_cbd_km
+  )
+))
+
+
+
+# 1. SUMMARY STATISTICS TABLE
+
+
+summary_stats_table <- summary_stats |>
+  
+  gt() |>
+  
+  tab_header(
+    title = md("**Melbourne Airbnb Market — Summary Statistics**"),
+    subtitle = "Key variables used in descriptive and exploratory analysis"
+  ) |>
+  
+  cols_label(
+    Variable = "Variable",
+    N = "Valid N",
+    Missing = "Missing",
+    Mean = "Mean",
+    SD = "SD",
+    Median = "Median",
+    IQR = "IQR"
+  ) |>
+  
+  fmt_integer(
+    columns = N
+  ) |>
+  
+  fmt_percent(
+    columns = Missing,
+    decimals = 1
+  ) |>
+  
+  fmt_currency(
+    columns = c(Mean, SD, Median, IQR),
+    rows = Variable == "Nightly price (AUD)",
+    currency = "AUD",
+    decimals = 0
+  ) |>
+  
+  fmt_number(
+    columns = c(Mean, SD, Median, IQR),
+    rows = Variable != "Nightly price (AUD)",
+    decimals = 1
+  ) |>
+  
+  cols_align(
+    align = "left",
+    columns = Variable
+  ) |>
+  
+  opt_row_striping() |>
+  
+  tab_source_note(
+    source_note =
+      "Price is winsorised at the 1st and 99th percentiles. Reviews in the previous 12 months are used as the primary demand proxy."
+  ) |>
+  
+  tab_options(
+    table.width = gt::pct(100),
+    data_row.padding = gt::px(6),
+    heading.align = "left"
+  )
+
+summary_stats_table
+
+# 2. LGA PRICE–DEMAND POSITIONING
+
+
+lga_summary <- L[, .(
+  
+  listings = .N,
+  
+  median_price =
+    median(price_wins, na.rm = TRUE),
+  
+  median_reviews_ltm =
+    median(review_velocity, na.rm = TRUE),
+  
+  active_90_share =
+    mean(active_90),
+  
+  median_dist_cbd =
+    median(dist_cbd_km, na.rm = TRUE)
+  
+), by = lga]
+
+
+# Remove very small submarkets
+lga_summary <- lga_summary[
+  listings >= 50
+]
+
+
+# Median reference lines
+price_cut <- median(
+  lga_summary$median_price,
+  na.rm = TRUE
+)
+
+demand_cut <- median(
+  lga_summary$median_reviews_ltm,
+  na.rm = TRUE
+)
+
+
+# Automatically label larger, higher-price,
+# or higher-demand LGAs
+lga_summary[, label_flag :=
+              listings >= quantile(
+                listings,
+                0.75,
+                na.rm = TRUE
+              ) |
+              median_reviews_ltm >= quantile(
+                median_reviews_ltm,
+                0.75,
+                na.rm = TRUE
+              ) |
+              median_price >= quantile(
+                median_price,
+                0.75,
+                na.rm = TRUE
+              )
+]
+
+
+lga_summary[, label_text :=
+              ifelse(
+                label_flag,
+                lga,
+                ""
+              )
+]
+
+
+
+# Plot
+
+
+p_lga <- ggplot(
+  lga_summary,
+  aes(
+    x = median_price,
+    y = median_reviews_ltm,
+    size = listings,
+    colour = active_90_share
+  )
+) +
+  
+  geom_vline(
+    xintercept = price_cut,
+    linetype = "dashed",
+    colour = "#6B7280",
+    linewidth = 0.8
+  ) +
+  
+  geom_hline(
+    yintercept = demand_cut,
+    linetype = "dashed",
+    colour = "#6B7280",
+    linewidth = 0.8
+  ) +
+  
+  geom_point(
+    alpha = 0.78
+  ) +
+  
+  ggrepel::geom_text_repel(
+    aes(label = label_text),
+    size = 3.5,
+    colour = COL_TEXT,
+    box.padding = 0.35,
+    point.padding = 0.2,
+    segment.colour = "#BFC5CE",
+    segment.size = 0.35,
+    max.overlaps = Inf,
+    min.segment.length = 0,
+    seed = 123
+  ) +
+  
+  scale_x_continuous(
+    labels = label_dollar(prefix = "$"),
+    breaks = pretty_breaks(n = 6),
+    expand = expansion(mult = c(0.03, 0.08))
+  ) +
+  
+  scale_y_continuous(
+    breaks = pretty_breaks(n = 6),
+    expand = expansion(mult = c(0.05, 0.10))
+  ) +
+  
+  scale_size_continuous(
+    range = c(3, 10),
+    labels = label_comma()
+  ) +
+  
+  scale_colour_gradient(
+    low = "#CFE3F7",
+    high = COL_BLUE,
+    labels = label_percent(accuracy = 1)
+  ) +
+  
+  labs(
+    title = "LGA Price–Demand Positioning",
+    subtitle =
+      "Selected labels highlight larger or higher-demand Melbourne Airbnb submarkets",
+    x = "Median nightly price (AUD)",
+    y = "Median reviews in last 12 months",
+    size = "Listings",
+    colour = "Reviewed ≤90d",
+    caption = paste0(
+      "Dashed lines show median values across included LGAs.\n",
+      "LGAs with fewer than 50 listings are excluded."
+    )
+  ) +
+  
+  theme_rq1 +
+  
+  theme(
+    panel.grid.major.y = element_line(
+      colour = "#E5E7EB",
+      linewidth = 0.45
+    ),
+    panel.grid.major.x = element_line(
+      colour = "#E5E7EB",
+      linewidth = 0.45
+    ),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.margin = margin(t = 4),
+    legend.title = element_text(
+      face = "bold"
+    )
+  ) +
+  
+  guides(
+    size = guide_legend(
+      title.position = "top",
+      nrow = 1,
+      override.aes = list(
+        alpha = 0.9
+      )
+    ),
+    colour = guide_colourbar(
+      title.position = "top",
+      barwidth = grid::unit(8, "cm"),
+      barheight = grid::unit(0.5, "cm")
+    )
+  )
+
+p_lga
+
+
+# 3. NIGHTLY PRICE BY PROPERTY TYPE
+
+# Order property types by median nightly price
+property_order <- L[
+  !is.na(price_wins),
+  .(
+    median_price =
+      median(price_wins, na.rm = TRUE)
+  ),
+  by = property_group
+][
+  order(median_price),
+  property_group
+]
+
+
+p_property_price <- ggplot(
+  L_price,
+  aes(
+    x = factor(
+      property_group,
+      levels = property_order
+    ),
+    y = price_wins
+  )
+) +
+  
+  geom_boxplot(
+    fill = COL_LIGHT,
+    colour = COL_BLUE,
+    alpha = 0.85,
+    width = 0.65,
+    linewidth = 0.6,
+    outlier.alpha = 0.15,
+    outlier.size = 0.7
+  ) +
+  
+  coord_flip() +
+  
+  scale_y_continuous(
+    labels = label_dollar(prefix = "$"),
+    expand = expansion(
+      mult = c(0.02, 0.04)
+    )
+  ) +
+  
+  labs(
+    title = "Nightly Prices Differ Across Property Types",
+    
+    subtitle =
+      "Distribution of winsorised nightly prices across major property groups",
+    
+    x = NULL,
+    
+    y = "Nightly price (AUD)",
+    
+    caption =
+      "Boxes show the median and interquartile range; points represent more extreme observations."
+  ) +
+  
+  theme_rq1
+
+
+p_property_price
+
+
+# 4. PROPERTY PROFILE — PRICE AND DEMAND
+
+
+profile_overview <- L[, .(
+  
+  listings = .N,
+  
+  median_price = as.numeric(
+    median(
+      price_wins,
+      na.rm = TRUE
+    )
+  ),
+  
+  median_reviews_ltm = as.numeric(
+    median(
+      review_velocity,
+      na.rm = TRUE
+    )
+  ),
+  
+  active_90_share = as.numeric(
+    mean(
+      active_90,
+      na.rm = TRUE
+    )
+  )
+  
+), by = .(
+  property_group,
+  capacity_segment
+)]
+
+
+# Remove small profile groups
+profile_overview <- profile_overview[
+  listings >= 50
+]
+
+
+# Put capacity categories in logical order
+profile_overview[
+  ,
+  capacity_segment := factor(
+    capacity_segment,
+    levels = c(
+      "1-2 guests",
+      "3-4 guests",
+      "5-6 guests",
+      "7+ guests"
+    )
+  )
+]
+
+
+
+# Heatmap
+
+
+p_profile_overview <- ggplot(
+  profile_overview,
+  aes(
+    x = capacity_segment,
+    y = property_group,
+    fill = median_reviews_ltm
+  )
+) +
+  
+  geom_tile(
+    colour = "white",
+    linewidth = 1
+  ) +
+  
+  # Show median nightly price inside each profile
+  geom_text(
+    aes(
+      label = paste0(
+        "$",
+        round(median_price)
+      )
+    ),
+    size = 3.6,
+    fontface = "bold"
+  ) +
+  
+  scale_fill_gradient(
+    low = "#EAF2FB",
+    high = COL_BLUE
+  ) +
+  
+  labs(
+    title = "Price and Demand Across Property Profiles",
+    
+    subtitle =
+      "Colour shows median review activity; labels show median nightly price",
+    
+    x = "Guest capacity",
+    
+    y = NULL,
+    
+    fill = "Median reviews\n(last 12 months)",
+    
+    caption =
+      "Only property profiles with at least 50 listings are shown."
+  ) +
+  
+  theme_rq1 +
+  
+  theme(
+    panel.grid = element_blank(),
+    
+    axis.text.x = element_text(
+      face = "bold"
+    ),
+    
+    legend.position = "bottom",
+    
+    legend.title = element_text(
+      face = "bold"
+    )
+  ) +
+  
+  guides(
+    fill = guide_colourbar(
+      title.position = "top",
+      barwidth = grid::unit(8, "cm"),
+      barheight = grid::unit(0.5, "cm")
+    )
+  )
+
+
+p_profile_overview
+
+
+#5. PROPERTY PROFILES FOR DEEPER INVESTIGATION
+
+
+# Create summary statistics for each:
+# LGA × property type × guest capacity combination
+
+profile_summary <- L[, .(
+  
+  listings = .N,
+  
+  median_price = as.numeric(
+    median(
+      price_wins,
+      na.rm = TRUE
+    )
+  ),
+  
+  price_IQR = as.numeric(
+    IQR(
+      price_wins,
+      na.rm = TRUE
+    )
+  ),
+  
+  median_reviews_ltm = as.numeric(
+    median(
+      review_velocity,
+      na.rm = TRUE
+    )
+  ),
+  
+  active_90_share = as.numeric(
+    mean(
+      active_90,
+      na.rm = TRUE
+    )
+  ),
+  
+  median_amenities = as.numeric(
+    median(
+      amenity_count,
+      na.rm = TRUE
+    )
+  ),
+  
+  median_dist_cbd = as.numeric(
+    median(
+      dist_cbd_km,
+      na.rm = TRUE
+    )
+  )
+  
+), by = .(
+  lga,
+  property_group,
+  capacity_segment
+)]
+
+
+# Exclude very small profile groups
+# to avoid drawing conclusions from unstable samples
+profile_summary <- profile_summary[
+  listings >= 20
+]
+
+
+# Order profiles for exploratory screening
+# This is NOT an overall performance ranking
+profile_screen <- profile_summary[
+  order(
+    -median_reviews_ltm,
+    -active_90_share,
+    -listings
+  )
+][
+  1:min(20, .N)
+]
+
+
+# ------------------------------------------------------------
+# Create final formatted table
+# ------------------------------------------------------------
+
+profile_table <- profile_screen |>
+  
+  gt() |>
+  
+  tab_header(
+    title = md(
+      "**Property Profiles for Deeper Investigation**"
+    ),
+    
+    subtitle =
+      "Submarket and property combinations showing notable recent demand activity"
+  ) |>
+  
+  tab_spanner(
+    label = "Property profile",
+    columns = c(
+      lga,
+      property_group,
+      capacity_segment
+    )
+  ) |>
+  
+  tab_spanner(
+    label = "Pricing",
+    columns = c(
+      median_price,
+      price_IQR
+    )
+  ) |>
+  
+  tab_spanner(
+    label = "Demand activity",
+    columns = c(
+      median_reviews_ltm,
+      active_90_share
+    )
+  ) |>
+  
+  cols_label(
+    lga = "LGA",
+    property_group = "Property type",
+    capacity_segment = "Capacity",
+    listings = "N",
+    median_price = "Median",
+    price_IQR = "IQR",
+    median_reviews_ltm = "Median reviews",
+    active_90_share = "Reviewed ≤90d",
+    median_amenities = "Amenities",
+    median_dist_cbd = "CBD km"
+  ) |>
+  
+  fmt_integer(
+    columns = listings
+  ) |>
+  
+  fmt_currency(
+    columns = c(
+      median_price,
+      price_IQR
+    ),
+    currency = "AUD",
+    decimals = 0
+  ) |>
+  
+  fmt_number(
+    columns = c(
+      median_reviews_ltm,
+      median_amenities,
+      median_dist_cbd
+    ),
+    decimals = 1
+  ) |>
+  
+  fmt_percent(
+    columns = active_90_share,
+    decimals = 1
+  ) |>
+  
+  # Highlight stronger review activity
+  data_color(
+    columns = median_reviews_ltm,
+    palette = c(
+      "#FFF7E6",
+      "#FFD58A",
+      COL_ORANGE
+    )
+  ) |>
+  
+  # Highlight greater recent activity
+  data_color(
+    columns = active_90_share,
+    palette = c(
+      "#F3F8FD",
+      "#A8CEF2",
+      COL_BLUE
+    )
+  ) |>
+  
+  opt_row_striping() |>
+  
+  tab_source_note(
+    source_note =
+      "Only profiles with at least 20 listings are included. Rows are ordered using review activity, recent activity and sample size for exploratory screening; this is not an overall performance ranking."
+  ) |>
+  
+  tab_options(
+    table.width = gt::pct(100),
+    data_row.padding = gt::px(5),
+    heading.align = "left"
+  )
+
+
+# Display table
+profile_table
+
+### REGRESSION \ PREDICTIVE ANALYSIS
+
+install.packages("car")
+library(car)
+library(dplyr)
+library(broom)
+
+# Review_scores_rating is missing exactly where has_reviews == FALSE.
+# Using both together with listwise deletion makes has_reviews collinear with the
+# intercept (constant in the fitted sample) — R will throw a rank-deficiency warning
+# and silently drop a coefficient. Impute so both stay usable.
+mean_rating <- mean(L$review_scores_rating[L$has_reviews], na.rm = TRUE)
+L[, review_scores_filled := fifelse(is.na(review_scores_rating), mean_rating, review_scores_rating)]
+
+
+
+# MODEL 1: What commands a price premium?
+model_price <- lm(
+  log_price ~ property_group + accommodates + bedrooms_clean + bathrooms_clean +
+    amenity_count + host_is_superhost + host_scale +
+    review_scores_filled + has_reviews +
+    dist_cbd_km + lga_grouped,
+  data = L
+)
+summary(model_price)
+vif(model_price)
+
+# Build the non-circular commercial-performance outcome
+L[, revenue_proxy := price_wins * occupancy_cal_90 * 365]
+L[, log_revenue_proxy := log1p(revenue_proxy)]
+
+# MODEL 2: "What is associated with stronger overall commercial performance?"
+model_revenue <- lm(
+  log_revenue_proxy ~ property_group + accommodates + bedrooms_clean + bathrooms_clean +
+    amenity_count + host_is_superhost + host_scale +
+    review_scores_filled + has_reviews +
+    dist_cbd_km + lga_grouped,
+  data = L
+)
+summary(model_revenue)
+vif(model_revenue)
+
+# Report-ready % effects for both models (log-linear coefficients → approx. % change)
+tidy(model_price, conf.int = TRUE) %>%
+  mutate(pct_effect = (exp(estimate) - 1) * 100) %>%
+  arrange(p.value) %>% print(n = Inf)
+
+tidy(model_revenue, conf.int = TRUE) %>%
+  mutate(pct_effect = (exp(estimate) - 1) * 100) %>%
+  arrange(p.value) %>% print(n = Inf) 
+
+### PRESCRIPTIVE ANALYSISsuppressPackageStartupMessages
+({
+  library(data.table)
+  library(ggplot2)
+})
+
+# Work on a copy so Method 3 does not alter the cleaned dataset
+M3 <- copy(L)
+
+
+# ============================================================
+# 1. CREATE ANALYSIS SAMPLE
+# ============================================================
+
+# For segmentation we need:
+# - a real LGA
+# - a defined property group
+# - a defined capacity segment
+# - a valid nightly price
+
+M3 <- M3[
+  !is.na(lga) & lga != "" &
+    !is.na(property_group) &
+    !is.na(capacity_segment) &
+    !is.na(price)
+]
+
+cat("Listings available for Method 3:", nrow(M3), "\n")
+cat("LGAs represented:", uniqueN(M3$lga), "\n")
+cat("Property groups:", uniqueN(M3$property_group), "\n")
+cat("Capacity segments:", uniqueN(M3$capacity_segment), "\n")
+
+# ============================================================
+# 2. BUILD SEGMENT-LEVEL SUMMARY
+# ============================================================
+
+segment_summary <- M3[
+  ,
+  .(
+    # -----------------------------
+    # MARKET SIZE / COMPETITION
+    # -----------------------------
+    listings = .N,
+    hosts = uniqueN(host_id),
+    
+    # -----------------------------
+    # PRICE
+    # -----------------------------
+    median_price =
+      as.numeric(median(price, na.rm = TRUE)),
+    
+    price_p25 =
+      as.numeric(quantile(price, 0.25, na.rm = TRUE)),
+    
+    price_p75 =
+      as.numeric(quantile(price, 0.75, na.rm = TRUE)),
+    
+    # -----------------------------
+    # DEMAND / BOOKING PRESSURE
+    # -----------------------------
+    median_cal_pressure_30 =
+      as.numeric(median(occupancy_cal_30, na.rm = TRUE)),
+    
+    median_cal_pressure_90 =
+      as.numeric(median(occupancy_cal_90, na.rm = TRUE)),
+    
+    median_reviews_ltm =
+      as.numeric(median(review_velocity, na.rm = TRUE)),
+    
+    # -----------------------------
+    # REVENUE BENCHMARK
+    # -----------------------------
+    median_ia_revenue_benchmark =
+      as.numeric(median(ia_revenue_derived, na.rm = TRUE)),
+    
+    # -----------------------------
+    # OTHER MARKET CHARACTERISTICS
+    # -----------------------------
+    median_dist_cbd_km =
+      as.numeric(median(dist_cbd_km, na.rm = TRUE)),
+    
+    superhost_share =
+      as.numeric(mean(host_is_superhost, na.rm = TRUE)),
+    
+    multi_host_share =
+      as.numeric(mean(host_is_multi, na.rm = TRUE))
+  ),
+  
+  by = .(
+    lga,
+    property_group,
+    capacity_segment
+  )
+]
+
+segment_summary[
+  ,
+  segment := paste(
+    lga,
+    property_group,
+    capacity_segment,
+    sep = " | "
+  )
+]
+
+dim(segment_summary)
+head(segment_summary)
+
+# ============================================================
+# 3. REMOVE SPARSE SEGMENTS
+# ============================================================
+
+MIN_SEGMENT_N <- 20
+
+segment_summary_valid <- segment_summary[
+  listings >= MIN_SEGMENT_N
+]
+
+cat(
+  "Total segments before filtering:",
+  nrow(segment_summary),
+  "\n"
+)
+
+cat(
+  "Segments with at least",
+  MIN_SEGMENT_N,
+  "listings:",
+  nrow(segment_summary_valid),
+  "\n"
+)
+
+# ============================================================
+# 4. CLEAN DISPLAY TABLE
+# ============================================================
+
+segment_table <- segment_summary_valid[
+  ,
+  .(
+    LGA = lga,
+    `Property type` = property_group,
+    `Capacity` = capacity_segment,
+    `No. listings` = listings,
+    
+    `Median nightly price` =
+      round(median_price, 0),
+    
+    `Median 30d calendar pressure` =
+      round(median_cal_pressure_30 * 100, 1),
+    
+    `Median reviews LTM` =
+      round(median_reviews_ltm, 1),
+    
+    `Median derived revenue benchmark` =
+      round(median_ia_revenue_benchmark, 0),
+    
+    `Median distance CBD (km)` =
+      round(median_dist_cbd_km, 1),
+    
+    `Superhost share (%)` =
+      round(superhost_share * 100, 1),
+    
+    `Multi-listing host share (%)` =
+      round(multi_host_share * 100, 1)
+  )
+]
+
+# Sort by calendar booking-pressure proxy first
+setorder(
+  segment_table,
+  -`Median 30d calendar pressure`,
+  -`Median nightly price`
+)
+
+head(segment_table, 20)
+
+# ============================================================
+# 5. SAME PROPERTY PROFILE ACROSS LGAs
+# ============================================================
+
+profile_comparison <- segment_summary_valid[
+  property_group == "Entire apartment" &
+    capacity_segment == "3-4 guests"
+][
+  order(-median_cal_pressure_30)
+]
+
+profile_comparison[
+  ,
+  .(
+    lga,
+    listings,
+    median_price = round(median_price),
+    calendar_pressure_30 =
+      round(100 * median_cal_pressure_30, 1),
+    median_reviews_ltm =
+      round(median_reviews_ltm, 1),
+    revenue_benchmark =
+      round(median_ia_revenue_benchmark),
+    median_dist_cbd_km =
+      round(median_dist_cbd_km, 1)
+  )
+]
+
+
