@@ -1274,6 +1274,8 @@ L[, review_scores_filled := fifelse(is.na(review_scores_rating), mean_rating, re
 
 
 
+
+# MODEL 1: What commands a price premium?
 model_price <- lm(
   log_price ~ property_group + accommodates + bedrooms_clean + bathrooms_clean +
     amenity_count + host_is_superhost + host_scale +
@@ -1314,6 +1316,7 @@ broom::tidy(model_price, conf.int = TRUE) %>%
   ) %>%
   dplyr::arrange(p.value) %>%
   print(n = Inf)
+
 
 
 ### PRESCRIPTIVE ANALYSISsuppressPackageStartupMessages
