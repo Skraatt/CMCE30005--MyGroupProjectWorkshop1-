@@ -1274,7 +1274,6 @@ L[, review_scores_filled := fifelse(is.na(review_scores_rating), mean_rating, re
 
 
 
-# MODEL 1: What commands a price premium?
 model_price <- lm(
   log_price ~ property_group + accommodates + bedrooms_clean + bathrooms_clean +
     amenity_count + host_is_superhost + host_scale +
@@ -1283,234 +1282,792 @@ model_price <- lm(
   data = L
 )
 summary(model_price)
-vif(model_price)
+car::vif(model_price)
 
-# Build the non-circular commercial-performance outcome
-L[, revenue_proxy := price_wins * occupancy_cal_90 * 365]
-L[, log_revenue_proxy := log1p(revenue_proxy)]
+# Robust inference
+lmtest::coeftest(
+  model_price,
+  vcov = sandwich::vcovHC(model_price, type = "HC3")
+)
 
-# MODEL 2: "What is associated with stronger overall commercial performance?"
-model_revenue <- lm(
-  log_revenue_proxy ~ property_group + accommodates + bedrooms_clean + bathrooms_clean +
+# MODEL 2: What is associated with stronger demand/calendar pressure?
+model_demand <- lm(
+  occupancy_cal_90 ~ property_group + accommodates + bedrooms_clean + bathrooms_clean +
     amenity_count + host_is_superhost + host_scale +
     review_scores_filled + has_reviews +
     dist_cbd_km + lga_grouped,
   data = L
 )
-summary(model_revenue)
-vif(model_revenue)
+
+summary(model_demand)
+car::vif(model_demand)
+
+lmtest::coeftest(
+  model_demand,
+  vcov = sandwich::vcovHC(model_demand, type = "HC3")
+)
 
 # Report-ready % effects for both models (log-linear coefficients → approx. % change)
-tidy(model_price, conf.int = TRUE) %>%
-  mutate(pct_effect = (exp(estimate) - 1) * 100) %>%
-  arrange(p.value) %>% print(n = Inf)
+broom::tidy(model_price, conf.int = TRUE) %>%
+  dplyr::mutate(
+    pct_effect = (exp(estimate) - 1) * 100
+  ) %>%
+  dplyr::arrange(p.value) %>%
+  print(n = Inf)
 
-tidy(model_revenue, conf.int = TRUE) %>%
-  mutate(pct_effect = (exp(estimate) - 1) * 100) %>%
-  arrange(p.value) %>% print(n = Inf) 
 
 ### PRESCRIPTIVE ANALYSISsuppressPackageStartupMessages
 ({
   library(data.table)
   library(ggplot2)
 })
-
-# Work on a copy so Method 3 does not alter the cleaned dataset
-M3 <- copy(L)
+# Start fresh from the fully cleaned master dataset
+M3_all <- copy(L)
 
 
 # ============================================================
-# 1. CREATE ANALYSIS SAMPLE
+# 1. CREATE MORE MEANINGFUL PROPERTY PROFILES FOR METHOD 3
 # ============================================================
 
-# For segmentation we need:
-# - a real LGA
-# - a defined property group
-# - a defined capacity segment
-# - a valid nightly price
+# The broad property_group used elsewhere is useful for regression,
+# but "Entire other" is too vague for a market-entry recommendation.
+#
+# Method 3 therefore creates a more interpretable property profile
+# specifically for market segmentation.
 
-M3 <- M3[
+M3_all[, property_profile_m3 := fcase(
+  
+  # Standard apartments
+  property_type %chin% c(
+    "Entire rental unit",
+    "Entire condo"
+  ),
+  "Apartment / condo",
+  
+  # Serviced apartments
+  property_type == "Entire serviced apartment",
+  "Serviced apartment",
+  
+  # Detached houses
+  property_type == "Entire home",
+  "House",
+  
+  # Townhouses
+  property_type == "Entire townhouse",
+  "Townhouse",
+  
+  # Guesthouse-style properties
+  property_type %chin% c(
+    "Entire guesthouse",
+    "Entire guest suite"
+  ),
+  "Guesthouse / guest suite",
+  
+  # Cottage / cabin
+  property_type %chin% c(
+    "Entire cottage",
+    "Entire cabin"
+  ),
+  "Cottage / cabin",
+  
+  # Villa / bungalow
+  property_type %chin% c(
+    "Entire villa",
+    "Entire bungalow"
+  ),
+  "Villa / bungalow",
+  
+  # Lofts
+  property_type == "Entire loft",
+  "Loft",
+  
+  # Vacation homes
+  property_type == "Entire vacation home",
+  "Vacation home",
+  
+  # Everything else is excluded from the MAIN segmentation
+  # rather than being hidden inside a vague "Other" category
+  default = NA_character_
+)]
+
+
+# Check how many listings fall into each profile
+cat("\n=== METHOD 3 PROPERTY PROFILES ===\n")
+
+print(
+  M3_all[
+    !is.na(property_profile_m3),
+    .N,
+    by = property_profile_m3
+  ][order(-N)]
+)
+
+
+# Show entire-property types excluded from the main segmentation
+# so the exclusion is transparent
+cat("\n=== OTHER ENTIRE-PROPERTY TYPES NOT USED IN MAIN SCREEN ===\n")
+
+excluded_property_types <- M3_all[
+  grepl("^Entire", property_type) &
+    is.na(property_profile_m3),
+  .N,
+  by = property_type
+][order(-N)]
+
+print(excluded_property_types)
+
+
+# ============================================================
+# 2. DEFINE METHOD 3 ANALYSIS SAMPLE
+# ============================================================
+
+# Need:
+#   - valid LGA
+#   - meaningful property profile
+#   - guest-capacity segment
+#
+# IMPORTANT:
+# We DO NOT require price to be non-missing here.
+#
+# A listing with missing price still exists in the market,
+# so it should still count toward existing Airbnb supply.
+
+M3 <- M3_all[
   !is.na(lga) & lga != "" &
-    !is.na(property_group) &
-    !is.na(capacity_segment) &
-    !is.na(price)
+    !is.na(property_profile_m3) &
+    !is.na(capacity_segment)
 ]
 
-cat("Listings available for Method 3:", nrow(M3), "\n")
-cat("LGAs represented:", uniqueN(M3$lga), "\n")
-cat("Property groups:", uniqueN(M3$property_group), "\n")
-cat("Capacity segments:", uniqueN(M3$capacity_segment), "\n")
+
+cat("\n=== METHOD 3 ANALYSIS SAMPLE ===\n")
+cat("Listings included:", nrow(M3), "\n")
+cat("LGAs:", uniqueN(M3$lga), "\n")
+cat(
+  "Property profiles:",
+  uniqueN(M3$property_profile_m3),
+  "\n"
+)
+cat(
+  "Capacity segments:",
+  uniqueN(M3$capacity_segment),
+  "\n"
+)
+
 
 # ============================================================
-# 2. BUILD SEGMENT-LEVEL SUMMARY
+# 3. HELPER FUNCTION FOR SAFE MEDIANS
+# ============================================================
+
+# Prevents grouped data.table errors if a group happens to contain
+# only missing values.
+
+safe_median <- function(x) {
+  
+  if (all(is.na(x))) {
+    return(NA_real_)
+  }
+  
+  as.numeric(
+    median(x, na.rm = TRUE)
+  )
+}
+
+
+# ============================================================
+# 4. BUILD LOCATION × PROPERTY × CAPACITY SEGMENTS
 # ============================================================
 
 segment_summary <- M3[
   ,
   .(
-    # -----------------------------
-    # MARKET SIZE / COMPETITION
-    # -----------------------------
+    
+    # --------------------------------------------------------
+    # EXISTING MARKET SUPPLY
+    # --------------------------------------------------------
+    
+    # ALL listings in the segment, including missing-price rows
     listings = .N,
+    
     hosts = uniqueN(host_id),
     
-    # -----------------------------
-    # PRICE
-    # -----------------------------
-    median_price =
-      as.numeric(median(price, na.rm = TRUE)),
+    
+    # --------------------------------------------------------
+    # PRICE DATA AVAILABILITY
+    # --------------------------------------------------------
+    
+    listings_with_price =
+      sum(!is.na(price)),
+    
+    price_coverage =
+      mean(!is.na(price)),
+    
+    
+    # --------------------------------------------------------
+    # PRICING POTENTIAL
+    # --------------------------------------------------------
+    
+    # Uses only genuinely observed prices.
+    # No price imputation.
+    median_listed_price =
+      safe_median(price),
     
     price_p25 =
-      as.numeric(quantile(price, 0.25, na.rm = TRUE)),
+      if (all(is.na(price))) {
+        NA_real_
+      } else {
+        as.numeric(
+          quantile(
+            price,
+            0.25,
+            na.rm = TRUE
+          )
+        )
+      },
     
     price_p75 =
-      as.numeric(quantile(price, 0.75, na.rm = TRUE)),
+      if (all(is.na(price))) {
+        NA_real_
+      } else {
+        as.numeric(
+          quantile(
+            price,
+            0.75,
+            na.rm = TRUE
+          )
+        )
+      },
     
-    # -----------------------------
-    # DEMAND / BOOKING PRESSURE
-    # -----------------------------
-    median_cal_pressure_30 =
-      as.numeric(median(occupancy_cal_30, na.rm = TRUE)),
     
-    median_cal_pressure_90 =
-      as.numeric(median(occupancy_cal_90, na.rm = TRUE)),
+    # --------------------------------------------------------
+    # RECENT GUEST ACTIVITY
+    # --------------------------------------------------------
     
+    # Reviews received in the last 12 months.
+    # Used as an IMPERFECT proxy for recent guest activity.
     median_reviews_ltm =
-      as.numeric(median(review_velocity, na.rm = TRUE)),
+      safe_median(review_velocity)
     
-    # -----------------------------
-    # REVENUE BENCHMARK
-    # -----------------------------
-    median_ia_revenue_benchmark =
-      as.numeric(median(ia_revenue_derived, na.rm = TRUE)),
-    
-    # -----------------------------
-    # OTHER MARKET CHARACTERISTICS
-    # -----------------------------
-    median_dist_cbd_km =
-      as.numeric(median(dist_cbd_km, na.rm = TRUE)),
-    
-    superhost_share =
-      as.numeric(mean(host_is_superhost, na.rm = TRUE)),
-    
-    multi_host_share =
-      as.numeric(mean(host_is_multi, na.rm = TRUE))
   ),
   
   by = .(
     lga,
-    property_group,
+    property_profile_m3,
     capacity_segment
   )
 ]
 
+
+# Percentage format for reporting
 segment_summary[
   ,
-  segment := paste(
-    lga,
-    property_group,
-    capacity_segment,
-    sep = " | "
-  )
+  price_coverage_pct :=
+    round(price_coverage * 100, 1)
 ]
 
-dim(segment_summary)
-head(segment_summary)
 
-# ============================================================
-# 3. REMOVE SPARSE SEGMENTS
-# ============================================================
-
-MIN_SEGMENT_N <- 20
-
-segment_summary_valid <- segment_summary[
-  listings >= MIN_SEGMENT_N
-]
-
+cat("\n=== RAW SEGMENT COUNT ===\n")
 cat(
-  "Total segments before filtering:",
+  "Total location-property-capacity segments:",
   nrow(segment_summary),
   "\n"
 )
 
+
+# ============================================================
+# 5. REMOVE SEGMENTS WITH TOO LITTLE EVIDENCE
+# ============================================================
+
+# A segment must have at least:
+#   20 total listings
+#   20 observed prices
+#
+# This avoids making conclusions from tiny samples.
+
+MIN_SEGMENT_N <- 20
+MIN_PRICE_N   <- 20
+
+
+segment_valid <- segment_summary[
+  listings >= MIN_SEGMENT_N &
+    listings_with_price >= MIN_PRICE_N &
+    !is.na(median_listed_price) &
+    !is.na(median_reviews_ltm)
+]
+
+
+cat("\n=== VALID SEGMENTS ===\n")
 cat(
-  "Segments with at least",
-  MIN_SEGMENT_N,
-  "listings:",
-  nrow(segment_summary_valid),
+  "Segments retained:",
+  nrow(segment_valid),
   "\n"
 )
 
+
 # ============================================================
-# 4. CLEAN DISPLAY TABLE
+# 6. CHECK PRICE COVERAGE
 # ============================================================
 
-segment_table <- segment_summary_valid[
-  ,
-  .(
-    LGA = lga,
-    `Property type` = property_group,
-    `Capacity` = capacity_segment,
-    `No. listings` = listings,
-    
-    `Median nightly price` =
-      round(median_price, 0),
-    
-    `Median 30d calendar pressure` =
-      round(median_cal_pressure_30 * 100, 1),
-    
-    `Median reviews LTM` =
-      round(median_reviews_ltm, 1),
-    
-    `Median derived revenue benchmark` =
-      round(median_ia_revenue_benchmark, 0),
-    
-    `Median distance CBD (km)` =
-      round(median_dist_cbd_km, 1),
-    
-    `Superhost share (%)` =
-      round(superhost_share * 100, 1),
-    
-    `Multi-listing host share (%)` =
-      round(multi_host_share * 100, 1)
-  )
-]
+# Because price is missing for some listings,
+# inspect how much observed-price information supports
+# each segment's median price.
 
-# Sort by calendar booking-pressure proxy first
-setorder(
-  segment_table,
-  -`Median 30d calendar pressure`,
-  -`Median nightly price`
+cat("\n=== PRICE COVERAGE SUMMARY ===\n")
+
+print(
+  summary(segment_valid$price_coverage)
 )
 
-head(segment_table, 20)
+
+cat("\n=== LOWEST PRICE-COVERAGE SEGMENTS ===\n")
+
+print(
+  segment_valid[
+    order(price_coverage),
+    .(
+      lga,
+      property_profile_m3,
+      capacity_segment,
+      listings,
+      listings_with_price,
+      price_coverage_pct
+    )
+  ][1:min(15, .N)]
+)
+
 
 # ============================================================
-# 5. SAME PROPERTY PROFILE ACROSS LGAs
+# 7. COMPARE LIKE WITH LIKE
 # ============================================================
 
-profile_comparison <- segment_summary_valid[
-  property_group == "Entire apartment" &
-    capacity_segment == "3-4 guests"
-][
-  order(-median_cal_pressure_30)
-]
+# Critical step:
+#
+# Do NOT compare a 7+ guest house directly with a
+# 1-2 guest apartment.
+#
+# Instead:
+#
+# Yarra | Apartment / condo | 3-4 guests
+#
+# is benchmarked against:
+#
+# Melbourne     | Apartment / condo | 3-4 guests
+# Port Phillip  | Apartment / condo | 3-4 guests
+# Darebin       | Apartment / condo | 3-4 guests
+# etc.
 
-profile_comparison[
+
+# First check how many LGAs are represented for each
+# property-profile × capacity combination.
+
+segment_valid[
   ,
-  .(
-    lga,
-    listings,
-    median_price = round(median_price),
-    calendar_pressure_30 =
-      round(100 * median_cal_pressure_30, 1),
-    median_reviews_ltm =
-      round(median_reviews_ltm, 1),
-    revenue_benchmark =
-      round(median_ia_revenue_benchmark),
-    median_dist_cbd_km =
-      round(median_dist_cbd_km, 1)
+  comparable_lgas :=
+    uniqueN(lga),
+  by = .(
+    property_profile_m3,
+    capacity_segment
   )
 ]
 
 
+# Require at least 3 LGAs for a meaningful cross-location comparison.
+segment_valid <- segment_valid[
+  comparable_lgas >= 3
+]
+
+
+# Create benchmarks based on the SAME property profile
+# AND SAME guest-capacity segment.
+
+segment_valid[
+  ,
+  `:=`(
+    
+    # Typical listed price across comparable LGAs
+    profile_median_price =
+      as.numeric(
+        median(
+          median_listed_price,
+          na.rm = TRUE
+        )
+      ),
+    
+    # Typical recent guest activity across comparable LGAs
+    profile_median_reviews =
+      as.numeric(
+        median(
+          median_reviews_ltm,
+          na.rm = TRUE
+        )
+      ),
+    
+    # Typical existing supply across comparable LGAs
+    profile_median_supply =
+      as.numeric(
+        median(
+          listings,
+          na.rm = TRUE
+        )
+      )
+    
+  ),
+  
+  by = .(
+    property_profile_m3,
+    capacity_segment
+  )
+]
+
+
+# ============================================================
+# 8. PRELIMINARY OPPORTUNITY SCREEN
+# ============================================================
+
+# A location-property segment passes the preliminary screen when:
+#
+#   1. Its median listed price is at or above the median
+#      for the SAME property profile + capacity across LGAs
+#
+#   AND
+#
+#   2. Its median recent review activity is at or above
+#      the median for the SAME property profile + capacity
+#
+# Supply is NOT used as an automatic exclusion criterion.
+# High supply may mean strong competition OR a mature market.
+
+
+segment_valid[
+  ,
+  strong_price :=
+    median_listed_price >=
+    profile_median_price
+]
+
+
+segment_valid[
+  ,
+  strong_activity :=
+    median_reviews_ltm >=
+    profile_median_reviews
+]
+
+
+segment_valid[
+  ,
+  opportunity_candidate :=
+    strong_price &
+    strong_activity
+]
+
+
+# ============================================================
+# 9. DESCRIBE RELATIVE EXISTING SUPPLY
+# ============================================================
+
+segment_valid[
+  ,
+  supply_position := fcase(
+    
+    listings < profile_median_supply,
+    "Lower relative supply",
+    
+    listings > profile_median_supply,
+    "Higher relative supply",
+    
+    default =
+      "Typical relative supply"
+  )
+]
+
+
+# ============================================================
+# 10. EXTRACT PRELIMINARY MARKET-ENTRY CANDIDATES
+# ============================================================
+
+candidate_segments <- segment_valid[
+  opportunity_candidate == TRUE
+]
+
+
+# Create readable labels
+candidate_segments[
+  ,
+  segment_label :=
+    paste(
+      lga,
+      capacity_segment,
+      sep = " | "
+    )
+]
+
+
+candidate_segments[
+  ,
+  full_segment :=
+    paste(
+      lga,
+      property_profile_m3,
+      capacity_segment,
+      sep = " | "
+    )
+]
+
+
+# ============================================================
+# 11. CLEAN CANDIDATE TABLE
+# ============================================================
+
+candidate_table <- candidate_segments[
+  ,
+  .(
+    
+    LGA = lga,
+    
+    `Property profile` =
+      property_profile_m3,
+    
+    `Guest capacity` =
+      capacity_segment,
+    
+    `Existing listings` =
+      listings,
+    
+    `Listings with observed price` =
+      listings_with_price,
+    
+    `Price coverage (%)` =
+      price_coverage_pct,
+    
+    `Median listed price ($)` =
+      round(
+        median_listed_price,
+        0
+      ),
+    
+    `Median reviews last 12m` =
+      round(
+        median_reviews_ltm,
+        1
+      ),
+    
+    `Relative supply` =
+      supply_position
+    
+  )
+]
+
+
+# Sort cleanly
+setorderv(
+  candidate_table,
+  cols = c(
+    "Property profile",
+    "Guest capacity",
+    "Median reviews last 12m",
+    "Median listed price ($)"
+  ),
+  order = c(
+    1,
+    1,
+    -1,
+    -1
+  )
+)
+
+
+cat("\n")
+cat("===============================================\n")
+cat("PRELIMINARY METHOD 3 MARKET-ENTRY CANDIDATES\n")
+cat("===============================================\n")
+
+print(candidate_table)
+
+
+# ============================================================
+# 12. SUPPORTING TABLE — ALL VALID SEGMENTS
+# ============================================================
+
+# Useful if you want to inspect candidates against segments
+# that DID NOT pass the screen.
+
+all_segment_table <- segment_valid[
+  ,
+  .(
+    
+    LGA = lga,
+    
+    `Property profile` =
+      property_profile_m3,
+    
+    `Guest capacity` =
+      capacity_segment,
+    
+    `Existing listings` =
+      listings,
+    
+    `Price coverage (%)` =
+      price_coverage_pct,
+    
+    `Median listed price ($)` =
+      round(
+        median_listed_price,
+        0
+      ),
+    
+    `Median reviews last 12m` =
+      round(
+        median_reviews_ltm,
+        1
+      ),
+    
+    `Strong price` =
+      strong_price,
+    
+    `Strong activity` =
+      strong_activity,
+    
+    `Preliminary candidate` =
+      opportunity_candidate,
+    
+    `Relative supply` =
+      supply_position
+  )
+]
+
+
+# ============================================================
+# 13. PRELIMINARY OPPORTUNITY VISUAL
+# ============================================================
+
+# This chart displays ONLY the segments that pass the
+# preliminary price + recent-activity screen.
+#
+# Interpretation:
+#
+# Further right = higher median listed nightly price
+# Larger dot    = greater median recent review activity
+# n =           = number of existing comparable listings
+#
+# Each facet is now a meaningful property profile,
+# rather than the vague "Entire other" category.
+
+
+opportunity_plot <- ggplot(
+  candidate_segments,
+  aes(
+    x = median_listed_price,
+    y = reorder(
+      segment_label,
+      median_listed_price
+    ),
+    size = median_reviews_ltm
+  )
+) +
+  
+  geom_point(
+    alpha = 0.75
+  ) +
+  
+  geom_text(
+    aes(
+      label =
+        paste0(
+          "n=",
+          listings
+        )
+    ),
+    hjust = -0.15,
+    size = 3
+  ) +
+  
+  facet_wrap(
+    ~ property_profile_m3,
+    scales = "free_y"
+  ) +
+  
+  scale_x_continuous(
+    labels =
+      scales::label_dollar(
+        prefix = "$"
+      ),
+    
+    expand =
+      expansion(
+        mult = c(
+          0.05,
+          0.18
+        )
+      )
+  ) +
+  
+  labs(
+    
+    title =
+      "Preliminary Market-Entry Candidate Segments",
+    ,
+    
+    x =
+      "Median listed nightly price ($)",
+    
+    y =
+      "LGA | Guest capacity",
+    
+    size =
+      "Median reviews\nlast 12 months",
+    
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    legend.position =
+      "bottom",
+    
+    panel.grid.minor =
+      element_blank(),
+    
+    strip.text =
+      element_text(
+        face = "bold"
+      )
+  )
+
+
+# Display the chart
+print(opportunity_plot)
+
+
+# ============================================================
+# 14. FINAL DIAGNOSTIC SUMMARY
+# ============================================================
+
+cat("\n=== METHOD 3 SUMMARY ===\n")
+
+cat(
+  "Valid comparable segments:",
+  nrow(segment_valid),
+  "\n"
+)
+
+cat(
+  "Preliminary opportunity candidates:",
+  nrow(candidate_segments),
+  "\n"
+)
+
+cat(
+  "Property profiles represented among candidates:",
+  uniqueN(candidate_segments$property_profile_m3),
+  "\n"
+)
+
+cat("\nCandidate count by property profile:\n")
+
+print(
+  candidate_segments[
+    ,
+    .N,
+    by = property_profile_m3
+  ][order(-N)]
+)
