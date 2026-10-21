@@ -2074,3 +2074,310 @@ print(
     by = property_profile_m3
   ][order(-N)]
 )
+
+# ============================================================
+# 15. BUSINESS APPLICATION:
+# REFIT VALIDATED RF MODELS USING ALL AVAILABLE TRAINING DATA
+# ============================================================
+
+price_full <- as.data.frame(price_data)
+demand_full <- as.data.frame(demand_data)
+
+rf_price_full <- ranger(
+  formula = price_formula,
+  data = price_full,
+  num.trees = 500,
+  mtry = max(
+    1,
+    floor(sqrt(length(entry_predictors)))
+  ),
+  min.node.size = 5,
+  importance = "permutation",
+  respect.unordered.factors = "order",
+  seed = 30005,
+  num.threads = 1
+)
+
+
+rf_demand_full <- ranger(
+  formula = demand_formula,
+  data = demand_full,
+  num.trees = 500,
+  mtry = max(
+    1,
+    floor(sqrt(length(entry_predictors)))
+  ),
+  min.node.size = 5,
+  importance = "permutation",
+  respect.unordered.factors = "order",
+  seed = 30005,
+  num.threads = 1
+)
+
+
+# ============================================================
+# 16. SCORE ALL LISTINGS WITH COMPLETE ENTRY-STAGE FEATURES
+# ============================================================
+
+scoring_required <- entry_predictors
+
+score_data <- M3_rf[
+  complete.cases(
+    M3_rf[, ..scoring_required]
+  )
+]
+
+score_df <- as.data.frame(score_data)
+
+
+# Predicted log nightly price
+score_data[, pred_log_price :=
+             predict(
+               rf_price_full,
+               data = score_df
+             )predictions]#Back-transformtoAUDscoredata[,predprice:=exp(predlogprice)]#Predicted90-dayunavailabilityproxyscoredata[,predunavailability90:=predict(rfdemandfull,data=scoredf)predictions
+]
+
+
+# Keep predicted demand within interpretable 0-1 range
+score_data[
+  ,
+  pred_unavailability_90 :=
+    pmin(
+      pmax(
+        pred_unavailability_90,
+        0
+      ),
+      1
+    )
+]
+
+
+# ============================================================
+# 17. AGGREGATE INTO MARKET-ENTRY PROFILES
+# ============================================================
+#
+# Each segment =
+# LGA × property type × capacity
+#
+# We use MODEL-PREDICTED performance rather than simply ranking
+# raw sample medians.
+# ============================================================
+
+rf_opportunity <- score_data[
+  ,
+  .(
+    listings = .N,
+    
+    median_pred_price =
+      median(
+        pred_price,
+        na.rm = TRUE
+      ),
+    
+    median_pred_unavailability =
+      median(
+        pred_unavailability_90,
+        na.rm = TRUE
+      )
+  ),
+  
+  by = .(
+    lga_grouped,
+    property_group,
+    capacity_segment
+  )
+]
+
+
+# Avoid tiny segments
+rf_opportunity <- rf_opportunity[
+  listings >= 20
+]
+
+
+# "Other" is not sufficiently actionable as a location
+rf_opportunity <- rf_opportunity[
+  lga_grouped != "Other"
+]
+
+
+# ============================================================
+# 18. COMPARE LIKE WITH LIKE
+# ============================================================
+#
+# Example:
+#
+# Melbourne | Entire apartment | 3-4 guests
+#
+# should be compared against:
+#
+# Yarra | Entire apartment | 3-4 guests
+# Port Phillip | Entire apartment | 3-4 guests
+# etc.
+# ============================================================
+
+rf_opportunity[
+  ,
+  :=(
+    profile_price_benchmark =
+      median(
+        median_pred_price,
+        na.rm = TRUE
+      ),
+    
+    profile_demand_benchmark =
+      median(
+        median_pred_unavailability,
+        na.rm = TRUE
+      )
+  ),
+  
+  by = .(
+    property_group,
+    capacity_segment
+  )
+]
+
+
+# ============================================================
+# 19. IDENTIFY PREDICTED OPPORTUNITY CANDIDATES
+# ============================================================
+
+rf_opportunity[
+  ,
+  strong_pred_price :=
+    median_pred_price >=
+    profile_price_benchmark
+]
+
+
+rf_opportunity[
+  ,
+  strong_pred_demand :=
+    median_pred_unavailability >=
+    profile_demand_benchmark
+]
+
+
+rf_opportunity[
+  ,
+  rf_candidate :=
+    strong_pred_price &
+    strong_pred_demand
+]
+
+
+rf_candidates <- rf_opportunity[
+  rf_candidate == TRUE
+][
+  order(
+    -median_pred_unavailability,
+    -median_pred_price
+  )
+]
+
+
+# ============================================================
+# 20. PRINT BUSINESS-READY CANDIDATE TABLE
+# ============================================================
+
+rf_candidate_table <- rf_candidates[
+  ,
+  .(
+    LGA = lga_grouped,
+    
+    Property type =
+      property_group,
+    
+    Guest capacity =
+      capacity_segment,
+    
+    Comparable listings =
+      listings,
+    
+    Predicted typical nightly price ($) =
+      round(
+        median_pred_price,
+        0
+      ),
+    
+    Predicted 90d unavailability (%) =
+      round(
+        100 *
+          median_pred_unavailability,
+        1
+      )
+  )
+]
+
+
+cat("\n")
+cat("=====================================================\n")
+cat("RANDOM FOREST — PREDICTED MARKET-ENTRY CANDIDATES\n")
+cat("=====================================================\n")
+
+print(
+  rf_candidate_table,
+  nrows = Inf
+)
+
+
+# ============================================================
+# 21. PREDICTED PRICE–DEMAND OPPORTUNITY PLOT
+# ============================================================
+
+p_rf_opportunity <- ggplot(
+  rf_opportunity,
+  aes(
+    x =
+      100 *
+      median_pred_unavailability,
+    
+    y =
+      median_pred_price,
+    
+    size =
+      listings
+  )
+) +
+  
+  geom_point(
+    alpha = 0.70
+  ) +
+  
+  facet_wrap(
+    ~ property_group,
+    scales = "free_y"
+  ) +
+  
+  labs(
+    title =
+      "Predicted Market-Entry Positioning",
+    
+    subtitle =
+      paste0(
+        "Random Forest predictions by ",
+        "LGA × property type × capacity"
+      ),
+    
+    x =
+      "Predicted 90-day unavailability proxy (%)",
+    
+    y =
+      "Predicted typical nightly price (AUD)",
+    
+    size =
+      "Comparable listings",
+    
+    caption =
+      paste0(
+        "Higher calendar unavailability may indicate stronger demand, ",
+        "but can also include host-blocked dates."
+      )
+  ) +
+  
+  theme_minimal()
+
+
+print(p_rf_opportunity)
