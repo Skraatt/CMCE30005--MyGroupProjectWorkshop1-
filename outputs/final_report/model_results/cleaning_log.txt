@@ -1,0 +1,9 @@
+Loading listings
+Listings: 25728 rows, 90 columns, 14113 hosts
+Removed 13 empty fields and 3 zero-variance fields
+Missing prices: 6553; price limits: $46 and $1590
+CBD/coastal distance correlation: 0.954
+Loading reviews
+Reviews: 1026690 rows; count differences for 0 listings
+Loading calendar
+Calendar loaded for validation only. Unavailable dates are not used as the demand outcome.

@@ -1,4 +1,6 @@
 ### COMPILATION
+
+
 setwd("~/Downloads/BACgroup/CMCE30005--MyGroupProjectWorkshop1-")
 ## PART 1: CLEANING + ETA
 ##Packages:
@@ -2135,8 +2137,7 @@ score_data[, pred_log_price :=
              predict(
                rf_price_full,
                data = score_df
-             )predictions]#Back-transformtoAUDscoredata[,predprice:=exp(predlogprice)]#Predicted90-dayunavailabilityproxyscoredata[,predunavailability90:=predict(rfdemandfull,data=scoredf)predictions
-]
+             )predictions]#Back-transformtoAUDscoredata[,predprice:=exp(predlogprice)]#Predicted90-dayunavailabilityproxyscoredata[,predunavailability90:=predict(rfdemandfull,data=scoredf)predictions]
 
 
 # Keep predicted demand within interpretable 0-1 range
