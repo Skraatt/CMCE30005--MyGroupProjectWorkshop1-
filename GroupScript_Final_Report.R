@@ -1,8 +1,8 @@
 setwd("~/Downloads/BACgroup/CMCE30005--MyGroupProjectWorkshop1-")
 
-# ============================================================
+
 # 0. SETUP
-# ============================================================
+
 
 current_repos <- getOption("repos")
 if (
@@ -209,9 +209,9 @@ save_gt_png <- function(table_object, filename, width = 1400, zoom = 2) {
   )
 }
 
-# ============================================================
+
 # 1. DATA PREPARATION
-# ============================================================
+
 
 listings_file <- find_input(c("listings_airbnb.csv", "listings.csv"))
 reviews_file <- find_input(c("reviews_airbnb.csv", "reviews.csv"))
@@ -642,9 +642,8 @@ check_expected(sum(L$price_missing), 6553, "Missing prices")
 check_expected(sum(L$price_outlier), 384, "Capped price outliers")
 check_expected(sum(is.na(L$bathrooms_clean)), 23, "Missing bathrooms")
 
-# ============================================================
+
 # 2. METHOD 1: DESCRIPTIVE ANALYSIS
-# ============================================================
 
 # 2.1 Table 5.1
 summary_row <- function(label, x) {
@@ -936,9 +935,9 @@ fwrite(
   file.path(RESULT_DIR, "Figure_5_2_plot_data.csv")
 )
 
-# ============================================================
+
 # 3. METHOD 2: CROSS-SECTIONAL REGRESSION
-# ============================================================
+
 
 D <- copy(L)
 
@@ -1399,9 +1398,9 @@ export_regression_tables(
   "Table_A2_demand_regression"
 )
 
-# ============================================================
+
 # 4. METHOD 3: PREDICTIVE MODELLING AND MARKET SEGMENTATION
-# ============================================================
+
 
 price_entry_predictors <- c(
   "property_group",
@@ -2378,9 +2377,8 @@ save_gt_png(
   zoom = 2
 )
 
-# ============================================================
+
 # 5. KEY-FINDING FIGURES AND SUPPORTING TABLES
-# ============================================================
 
 # 5.1 Figure 6.1
 price_per_guest_summary <- L[
@@ -3296,9 +3294,8 @@ save_gt_png(
 )
 
 
-# ============================================================
+
 # 6. RUN SUMMARY
-# ============================================================
 
 expected_figure_files <- c(
   "Figure_5_1_lga_price_activity.png",
